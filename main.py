@@ -7,8 +7,16 @@ from io_utils import (
     make_output_path,
     to_csv_path,
 )
-from segmenter import (
-    prototype_rice_weed_segmentation,
+# 通常のプロトタイプ処理を使う場合はこちら。
+# from segmenter import (
+#     prototype_rice_weed_segmentation,
+#     make_result_image,
+#     judge_level,
+# )
+
+# YOLO-seg版を試す場合はこちら。
+from yolo_segmenter import (
+    yolo_rice_weed_segmentation as prototype_rice_weed_segmentation,
     make_result_image,
     judge_level,
 )
@@ -238,8 +246,9 @@ def process_one(width: int, height: int, image_path: Path) -> list:
             f"input.csv=({width}, {height}), actual=({actual_w}, {actual_h})"
         )
 
-    # 現時点では仮アルゴリズムで水稲・雑草マスクを作成する。
-    # 後でYOLO-segを導入する場合は、この関数呼び出しを差し替える。
+    # 水稲・雑草マスクを作成する。
+    # 現在は import 側で prototype版 / YOLO版 を切り替える。
+    # main.py側では rice_mask, weed_mask を受け取るだけにしておく。
     rice_mask, weed_mask = prototype_rice_weed_segmentation(image)
 
     # p: 水稲領域の画素数。

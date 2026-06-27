@@ -19,3 +19,9 @@ data/labels/
 # OS
 .DS_Store
 Thumbs.db
+
+datasets/
+checkpoints/
+runs/
+*.pth
+*.pt
