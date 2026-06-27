@@ -1,0 +1,21 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# uv
+.uv-cache/
+
+# YOLO outputs
+runs/
+*.pt
+*.onnx
+*.engine
+
+# dataset images
+data/images/
+data/labels/
+
+# OS
+.DS_Store
+Thumbs.db
