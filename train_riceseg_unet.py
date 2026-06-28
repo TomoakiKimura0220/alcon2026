@@ -1,19 +1,22 @@
 """
-RiceSEG Japan データを使って、ALCON用3クラスU-Netを学習するスクリプト。
+RiceSEG Global データを使って、ALCON用3クラスU-Netを学習するスクリプト。
 
 目的:
     RiceSEG の6クラスラベルを ALCON 用の3クラスへ統合し、
     水稲・雑草・その他を画素単位で分類するモデルを学習する。
 
 入力:
-    datasets/RiceSEG/global rice segmentation/Japan/TKO_1
-    datasets/RiceSEG/global rice segmentation/Japan/TKO_2
-    datasets/RiceSEG/global rice segmentation/Japan/TKO_3
+    datasets/RiceSEG/global rice segmentation/China
+    datasets/RiceSEG/global rice segmentation/India
+    datasets/RiceSEG/global rice segmentation/Japan
+    datasets/RiceSEG/global rice segmentation/Philippines
+    datasets/RiceSEG/global rice segmentation/Tanzania
 
 データ分割:
-    Japan/TKO_1 + TKO_2 + TKO_3 を混ぜて
+    China + India + Japan + Philippines + Tanzania の全データを結合し、
     train: 80%
     val  : 20%
+    にランダム分割する。
 
 出力:
     checkpoints/riceseg_unet_best.pth
@@ -23,13 +26,13 @@ RiceSEG 6クラス:
     1: green vegetation
     2: senescent vegetation
     3: panicle
-    4: weed
+    4: weeds
     5: duckweed
 
 ALCON用3クラス:
     0: other = background
     1: rice  = green vegetation + senescent vegetation + panicle
-    2: weed  = weed + duckweed
+    2: weed  = weeds + duckweed
 """
 
 from __future__ import annotations
@@ -39,7 +42,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import ConcatDataset, DataLoader, random_split
 from tqdm import tqdm
 
 from riceseg_dataset import RiceSEGDataset, ALCON_NUM_CLASSES
@@ -55,8 +58,9 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # weedは小さい領域として写ることが多いため、512x512のまま学習する。
 IMAGE_SIZE = 512
 
-# Mac CPUでは2が安全。Colab T4では4も試せる。
-BATCH_SIZE = 2
+# Global RiceSEGはJapanのみより枚数が多いため、学習はColab GPU前提。
+# Colab T4では4を基本値にする。メモリ不足なら2へ下げる。
+BATCH_SIZE = 4
 
 EPOCHS = 10
 LEARNING_RATE = 1e-3
@@ -66,11 +70,21 @@ NUM_WORKERS = 0
 NUM_CLASSES = ALCON_NUM_CLASSES
 LABEL_MODE = "alcon"
 
-# 0 other, 1 rice, 2 weed。
-# weedは少数クラスなので重めにするが、過検出を避けるため6クラス時より控えめにする。
-CLASS_WEIGHTS = [0.5, 1.0, 3.0]
+# 学習に使う国。
+# 各国フォルダ配下の全regionを読み込むため、RiceSEGDatasetにはregions=Noneを渡す。
+COUNTRIES = [
+    "China",
+    "India",
+    "Japan",
+    "Philippines",
+    "Tanzania",
+]
 
-# Japan/TKO_1 + TKO_2 + TKO_3 を混ぜて 8:2 にランダム分割する。
+# 0 other, 1 rice, 2 weed。
+# Japan only実験では w4.5 がバランス型だったため、Global実験でもまず同じ重みで比較する。
+CLASS_WEIGHTS = [0.5, 1.0, 4.5]
+
+# 全countryを結合して 8:2 にランダム分割する。
 TRAIN_RATIO = 0.8
 RANDOM_SEED = 42
 
@@ -167,14 +181,31 @@ class UNet(nn.Module):
         return torch.cat([skip, x], dim=1)
 
 
-def create_random_japan_train_val_datasets() -> tuple[torch.utils.data.Subset, torch.utils.data.Subset]:
-    """Japan/TKO_1 + TKO_2 + TKO_3 をすべて混ぜて、8:2でランダム分割する。"""
-    full_dataset = RiceSEGDataset(
-        country="Japan",
-        regions=["TKO_1", "TKO_2", "TKO_3"],
+def create_country_dataset(country: str) -> RiceSEGDataset:
+    """
+    指定した国の全regionを読み込むRiceSEGDatasetを作る。
+
+    regions=None にすることで、countryフォルダ配下の全regionを対象にする。
+    """
+    return RiceSEGDataset(
+        country=country,
+        regions=None,
         image_size=IMAGE_SIZE,
         label_mode=LABEL_MODE,
     )
+
+
+def create_random_global_train_val_datasets() -> tuple[torch.utils.data.Subset, torch.utils.data.Subset]:
+    """複数国のRiceSEGデータを結合して、8:2でランダム分割する。"""
+    datasets = []
+
+    print("[INFO] loading RiceSEG countries")
+    for country in COUNTRIES:
+        dataset = create_country_dataset(country)
+        datasets.append(dataset)
+        print(f"  {country:<12}: {len(dataset)} images")
+
+    full_dataset = ConcatDataset(datasets)
 
     train_size = int(len(full_dataset) * TRAIN_RATIO)
     val_size = len(full_dataset) - train_size
@@ -278,7 +309,7 @@ def validate_one_epoch(
 def main() -> None:
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
-    train_dataset, val_dataset = create_random_japan_train_val_datasets()
+    train_dataset, val_dataset = create_random_global_train_val_datasets()
 
     train_loader = DataLoader(
         train_dataset,
@@ -315,7 +346,8 @@ def main() -> None:
     print(f"image_size  : {IMAGE_SIZE}")
     print(f"batch_size  : {BATCH_SIZE}")
     print(f"epochs      : {EPOCHS}")
-    print(f"split       : Japan TKO_1+TKO_2+TKO_3 random {TRAIN_RATIO:.1f}:{1.0 - TRAIN_RATIO:.1f}")
+    print(f"split       : Global RiceSEG random {TRAIN_RATIO:.1f}:{1.0 - TRAIN_RATIO:.1f}")
+    print(f"countries   : {', '.join(COUNTRIES)}")
     print(f"random_seed : {RANDOM_SEED}")
     print(f"label_mode  : {LABEL_MODE}")
     print(f"num_classes : {NUM_CLASSES}")
@@ -362,6 +394,8 @@ def main() -> None:
                     "train_ratio": TRAIN_RATIO,
                     "random_seed": RANDOM_SEED,
                     "class_weights": CLASS_WEIGHTS,
+                    "countries": COUNTRIES,
+                    "dataset_scope": "global",
                 },
                 BEST_MODEL_PATH,
             )
