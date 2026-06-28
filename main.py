@@ -21,6 +21,12 @@ from yolo_segmenter import (
     judge_level,
 )
 
+# RiceSEG版を試す場合はこちら。
+from riceseg_segmenter import (
+    riceseg_rice_weed_segmentation as prototype_rice_weed_segmentation,
+    make_result_image,
+    judge_level,
+)
 
 INPUT_CSV = "input.csv"
 OUTPUT_CSV = "output.csv"

@@ -6,22 +6,22 @@ __pycache__/
 # uv
 .uv-cache/
 
-# YOLO outputs
+# YOLO outputs / model weights
 runs/
 *.pt
 *.onnx
 *.engine
+*.pth
 
-# dataset images
-data/images/
-data/labels/
+# Local datasets and checkpoints
+# RiceSEG is large, so never commit it to Git.
+datasets/
+checkpoints/
+
+# ALCON generated outputs
+*-output.JPG
+output.csv
 
 # OS
 .DS_Store
 Thumbs.db
-
-datasets/
-checkpoints/
-runs/
-*.pth
-*.pt
