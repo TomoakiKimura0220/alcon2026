@@ -1,5 +1,3 @@
-
-
 """
 RiceSEG を PyTorch の Dataset として読み込むためのモジュール。
 
@@ -23,7 +21,7 @@ RiceSEG を PyTorch の Dataset として読み込むためのモジュール。
     - label は 512x512 の uint8 グレースケール画像。
     - label の画素値がそのままクラスIDになっている。
 
-RiceSEG クラスIDの想定:
+RiceSEG 6クラス:
     0: background
     1: green vegetation
     2: senescent vegetation
@@ -31,9 +29,10 @@ RiceSEG クラスIDの想定:
     4: weed
     5: duckweed
 
-ALCON用の統合は、このDatasetでは行わない。
-このDatasetでは6クラス分類として学習し、推論後に別モジュール側で
-水稲・雑草・その他へ統合する。
+ALCON用3クラス:
+    0: other = background
+    1: rice  = green vegetation + senescent vegetation + panicle
+    2: weed  = weed + duckweed
 """
 
 from __future__ import annotations
@@ -48,6 +47,7 @@ from torch.utils.data import Dataset
 
 
 RICESEG_NUM_CLASSES = 6
+ALCON_NUM_CLASSES = 3
 
 
 @dataclass(frozen=True)
@@ -73,7 +73,7 @@ class RiceSEGDataset(Dataset):
         label_tensor:
             shape = (H, W)
             dtype = torch.long
-            value = 0〜5 のクラスID
+            value = クラスID
     """
 
     def __init__(
@@ -82,6 +82,7 @@ class RiceSEGDataset(Dataset):
         country: str = "Japan",
         regions: list[str] | None = None,
         image_size: int | None = None,
+        label_mode: str = "riceseg",
     ) -> None:
         """
         Args:
@@ -97,11 +98,18 @@ class RiceSEGDataset(Dataset):
                 リサイズ後の1辺のサイズ。
                 None の場合は元画像サイズのまま使う。
                 RiceSEGのcrop画像は基本512x512なので、通常はNoneでよい。
+            label_mode:
+                "riceseg" の場合は RiceSEG の6クラスIDをそのまま返す。
+                "alcon" の場合は ALCON用の3クラスへ変換して返す。
         """
         self.root_dir = Path(root_dir)
         self.country = country
         self.country_dir = self.root_dir / country
         self.image_size = image_size
+        self.label_mode = label_mode
+
+        if self.label_mode not in {"riceseg", "alcon"}:
+            raise ValueError(f"label_mode は 'riceseg' または 'alcon' を指定してください: {self.label_mode}")
 
         if not self.country_dir.exists():
             raise FileNotFoundError(f"country_dir が存在しません: {self.country_dir}")
@@ -195,10 +203,19 @@ class RiceSEGDataset(Dataset):
             image_rgb = cv2.resize(image_rgb, size, interpolation=cv2.INTER_LINEAR)
             label = cv2.resize(label, size, interpolation=cv2.INTER_NEAREST)
 
-        if label.min() < 0 or label.max() >= RICESEG_NUM_CLASSES:
+        if self.label_mode == "alcon":
+            label_3class = np.zeros_like(label, dtype=np.uint8)
+            label_3class[np.isin(label, [1, 2, 3])] = 1
+            label_3class[np.isin(label, [4, 5])] = 2
+            label = label_3class
+            num_classes = ALCON_NUM_CLASSES
+        else:
+            num_classes = RICESEG_NUM_CLASSES
+
+        if label.min() < 0 or label.max() >= num_classes:
             raise ValueError(
                 f"ラベル値が想定範囲外です: {sample.label_path}, "
-                f"min={label.min()}, max={label.max()}"
+                f"min={label.min()}, max={label.max()}, label_mode={self.label_mode}"
             )
 
         image_tensor = torch.from_numpy(image_rgb).permute(2, 0, 1).float() / 255.0
@@ -213,6 +230,7 @@ class RiceSEGDataset(Dataset):
 
 def create_japan_train_val_datasets(
     image_size: int | None = None,
+    label_mode: str = "riceseg",
 ) -> tuple[RiceSEGDataset, RiceSEGDataset]:
     """
     最初の検証用に Japan データだけで train/val を作る。
@@ -227,12 +245,14 @@ def create_japan_train_val_datasets(
         country="Japan",
         regions=["TKO_1", "TKO_2"],
         image_size=image_size,
+        label_mode=label_mode,
     )
 
     val_dataset = RiceSEGDataset(
         country="Japan",
         regions=["TKO_3"],
         image_size=image_size,
+        label_mode=label_mode,
     )
 
     return train_dataset, val_dataset
@@ -240,20 +260,22 @@ def create_japan_train_val_datasets(
 
 def main() -> None:
     """Datasetが正しく読めるかの簡易確認。"""
-    train_dataset, val_dataset = create_japan_train_val_datasets()
+    for label_mode in ["riceseg", "alcon"]:
+        print(f"\n[label_mode={label_mode}]")
+        train_dataset, val_dataset = create_japan_train_val_datasets(label_mode=label_mode)
 
-    print(f"train samples: {len(train_dataset)}")
-    print(f"val samples  : {len(val_dataset)}")
+        print(f"train samples: {len(train_dataset)}")
+        print(f"val samples  : {len(val_dataset)}")
 
-    image, label = train_dataset[0]
-    sample = train_dataset.get_sample_info(0)
+        image, label = train_dataset[0]
+        sample = train_dataset.get_sample_info(0)
 
-    print("\n[first sample]")
-    print(f"image path: {sample.image_path}")
-    print(f"label path: {sample.label_path}")
-    print(f"image tensor: shape={tuple(image.shape)}, dtype={image.dtype}, min={image.min():.3f}, max={image.max():.3f}")
-    print(f"label tensor: shape={tuple(label.shape)}, dtype={label.dtype}")
-    print(f"label unique: {torch.unique(label).tolist()}")
+        print("\n[first sample]")
+        print(f"image path: {sample.image_path}")
+        print(f"label path: {sample.label_path}")
+        print(f"image tensor: shape={tuple(image.shape)}, dtype={image.dtype}, min={image.min():.3f}, max={image.max():.3f}")
+        print(f"label tensor: shape={tuple(label.shape)}, dtype={label.dtype}")
+        print(f"label unique: {torch.unique(label).tolist()}")
 
 
 if __name__ == "__main__":

@@ -1,8 +1,9 @@
 """
-RiceSEG Japan データを使って U-Net を学習するスクリプト。
+RiceSEG Japan データを使って、ALCON用3クラスU-Netを学習するスクリプト。
 
 目的:
-    RiceSEG の6クラスセマンティックセグメンテーションモデルを学習する。
+    RiceSEG の6クラスラベルを ALCON 用の3クラスへ統合し、
+    水稲・雑草・その他を画素単位で分類するモデルを学習する。
 
 入力:
     datasets/RiceSEG/global rice segmentation/Japan/TKO_1
@@ -17,7 +18,7 @@ RiceSEG Japan データを使って U-Net を学習するスクリプト。
 出力:
     checkpoints/riceseg_unet_best.pth
 
-学習クラス:
+RiceSEG 6クラス:
     0: background
     1: green vegetation
     2: senescent vegetation
@@ -25,8 +26,10 @@ RiceSEG Japan データを使って U-Net を学習するスクリプト。
     4: weed
     5: duckweed
 
-ALCON用の水稲・雑草・その他への統合は、この学習スクリプトでは行わない。
-推論時に別モジュールで統合する。
+ALCON用3クラス:
+    0: other = background
+    1: rice  = green vegetation + senescent vegetation + panicle
+    2: weed  = weed + duckweed
 """
 
 from __future__ import annotations
@@ -39,67 +42,37 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 
-from riceseg_dataset import RiceSEGDataset, RICESEG_NUM_CLASSES
+from riceseg_dataset import RiceSEGDataset, ALCON_NUM_CLASSES
 
 
 CHECKPOINT_DIR = Path("checkpoints")
 BEST_MODEL_PATH = CHECKPOINT_DIR / "riceseg_unet_best.pth"
 
-# M1 MacではCPU運用前提。
-# PyTorchのMPSを使う場合は、動作が不安定なケースもあるため最初はCPUで確認する。
-DEVICE = "cpu"
+# Colabではcuda、Macではcpuになる。
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-#
-# weedは小さい領域として写ることが多いため、256x256へ縮小すると潰れやすい。
-# RiceSEGの元画像サイズである512x512のまま学習し、細かい雑草領域を残す。
+# RiceSEGのcrop画像は512x512。
+# weedは小さい領域として写ることが多いため、512x512のまま学習する。
 IMAGE_SIZE = 512
 
-# CPU学習では重くなるが、まずはbatch_size=2のまま試す。
-# メモリ不足や極端に遅い場合は BATCH_SIZE = 1 に下げる。
+# Mac CPUでは2が安全。Colab T4では4も試せる。
 BATCH_SIZE = 2
 
-# 5 epochでは少数クラスのweedを学習しきれない可能性があるため、少し増やす。
-EPOCHS = 5
-
+EPOCHS = 10
 LEARNING_RATE = 1e-3
 NUM_WORKERS = 0
 
-# class_4 weed / class_5 duckweed は画素数が少なく、通常のCrossEntropyLossでは無視されやすい。
-# そこで少数クラスの損失を重くし、weed/duckweedを予測する方向へ学習を寄せる。
-# まずは控えめな手動重みで試す。
-CLASS_WEIGHTS = [0.2, 0.3, 1.0, 1.0, 5.0, 5.0]
+# ALCON用3クラスで学習する。
+NUM_CLASSES = ALCON_NUM_CLASSES
+LABEL_MODE = "alcon"
+
+# 0 other, 1 rice, 2 weed。
+# weedは少数クラスなので重めにするが、過検出を避けるため6クラス時より控えめにする。
+CLASS_WEIGHTS = [0.5, 1.0, 3.0]
 
 # Japan/TKO_1 + TKO_2 + TKO_3 を混ぜて 8:2 にランダム分割する。
-# TKO_3だけをvalにすると撮影条件差の影響が大きすぎるため、
-# まずはモデル自体がRiceSEG Japanを学習できるか確認する。
 TRAIN_RATIO = 0.8
 RANDOM_SEED = 42
-def create_random_japan_train_val_datasets() -> tuple[torch.utils.data.Subset, torch.utils.data.Subset]:
-    """
-    Japan/TKO_1 + TKO_2 + TKO_3 をすべて混ぜて、8:2でランダム分割する。
-
-    目的:
-        地域別分割による分布差の影響をいったん弱め、
-        U-NetがRiceSEG Japan全体を学習できるか確認する。
-    """
-    full_dataset = RiceSEGDataset(
-        country="Japan",
-        regions=["TKO_1", "TKO_2", "TKO_3"],
-        image_size=IMAGE_SIZE,
-    )
-
-    train_size = int(len(full_dataset) * TRAIN_RATIO)
-    val_size = len(full_dataset) - train_size
-
-    generator = torch.Generator().manual_seed(RANDOM_SEED)
-
-    train_dataset, val_dataset = random_split(
-        full_dataset,
-        [train_size, val_size],
-        generator=generator,
-    )
-
-    return train_dataset, val_dataset
 
 
 class DoubleConv(nn.Module):
@@ -129,11 +102,11 @@ class UNet(nn.Module):
         RGB画像 3ch
 
     出力:
-        RiceSEG 6クラスのlogits
-        shape = (B, 6, H, W)
+        ALCON用3クラスのlogits
+        shape = (B, 3, H, W)
     """
 
-    def __init__(self, in_channels: int = 3, num_classes: int = 6, base_channels: int = 32) -> None:
+    def __init__(self, in_channels: int = 3, num_classes: int = 3, base_channels: int = 32) -> None:
         super().__init__()
 
         self.enc1 = DoubleConv(in_channels, base_channels)
@@ -187,26 +160,38 @@ class UNet(nn.Module):
 
     @staticmethod
     def _concat(x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
-        """
-        U-Netのskip connectionを結合する。
-
-        リサイズの丸め誤差でサイズが1pxずれる場合に備え、
-        xをskip側のサイズへ合わせる。
-        """
+        """U-Netのskip connectionを結合する。"""
         if x.shape[-2:] != skip.shape[-2:]:
             x = F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False)
 
         return torch.cat([skip, x], dim=1)
 
 
-def calculate_pixel_accuracy(logits: torch.Tensor, labels: torch.Tensor) -> float:
-    """
-    画素単位Accuracyを計算する。
+def create_random_japan_train_val_datasets() -> tuple[torch.utils.data.Subset, torch.utils.data.Subset]:
+    """Japan/TKO_1 + TKO_2 + TKO_3 をすべて混ぜて、8:2でランダム分割する。"""
+    full_dataset = RiceSEGDataset(
+        country="Japan",
+        regions=["TKO_1", "TKO_2", "TKO_3"],
+        image_size=IMAGE_SIZE,
+        label_mode=LABEL_MODE,
+    )
 
-    注意:
-        背景画素が多いと高く見えやすい。
-        最終評価ではクラス別IoUも見るべき。
-    """
+    train_size = int(len(full_dataset) * TRAIN_RATIO)
+    val_size = len(full_dataset) - train_size
+
+    generator = torch.Generator().manual_seed(RANDOM_SEED)
+
+    train_dataset, val_dataset = random_split(
+        full_dataset,
+        [train_size, val_size],
+        generator=generator,
+    )
+
+    return train_dataset, val_dataset
+
+
+def calculate_pixel_accuracy(logits: torch.Tensor, labels: torch.Tensor) -> float:
+    """画素単位Accuracyを計算する。"""
     preds = torch.argmax(logits, dim=1)
     correct = (preds == labels).sum().item()
     total = labels.numel()
@@ -311,7 +296,7 @@ def main() -> None:
 
     model = UNet(
         in_channels=3,
-        num_classes=RICESEG_NUM_CLASSES,
+        num_classes=NUM_CLASSES,
         base_channels=32,
     ).to(DEVICE)
 
@@ -332,6 +317,8 @@ def main() -> None:
     print(f"epochs      : {EPOCHS}")
     print(f"split       : Japan TKO_1+TKO_2+TKO_3 random {TRAIN_RATIO:.1f}:{1.0 - TRAIN_RATIO:.1f}")
     print(f"random_seed : {RANDOM_SEED}")
+    print(f"label_mode  : {LABEL_MODE}")
+    print(f"num_classes : {NUM_CLASSES}")
     print(f"class_weight: {CLASS_WEIGHTS}")
     print(f"train images: {len(train_dataset)}")
     print(f"val images  : {len(val_dataset)}")
@@ -366,7 +353,8 @@ def main() -> None:
             torch.save(
                 {
                     "model_state_dict": model.state_dict(),
-                    "num_classes": RICESEG_NUM_CLASSES,
+                    "num_classes": NUM_CLASSES,
+                    "label_mode": LABEL_MODE,
                     "image_size": IMAGE_SIZE,
                     "base_channels": 32,
                     "best_val_loss": best_val_loss,

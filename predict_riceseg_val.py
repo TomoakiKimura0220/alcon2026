@@ -1,16 +1,14 @@
-
-
 """
-RiceSEG U-Net の検証用推論スクリプト。
+ALCON用3クラスU-Net の検証用推論スクリプト。
 
 目的:
     学習済みモデル checkpoints/riceseg_unet_best.pth を使って、
-    RiceSEG Japan/TKO_3 の検証画像を推論し、目視確認用の画像を保存する。
+    RiceSEG Japan 画像を推論し、目視確認用の比較画像を保存する。
 
 入力:
     - checkpoints/riceseg_unet_best.pth
-    - datasets/RiceSEG/global rice segmentation/Japan/TKO_3/rgb/*.jpg
-    - datasets/RiceSEG/global rice segmentation/Japan/TKO_3/label/*.png
+    - datasets/RiceSEG/global rice segmentation/Japan/{TKO_1,TKO_2,TKO_3}/rgb/*.jpg
+    - datasets/RiceSEG/global rice segmentation/Japan/{TKO_1,TKO_2,TKO_3}/label/*.png
 
 出力:
     - runs/riceseg_val/*.jpg
@@ -20,25 +18,19 @@ RiceSEG U-Net の検証用推論スクリプト。
     中: 正解ラベルの可視化
     右: 予測ラベルの可視化
 
-RiceSEG クラスIDの想定:
-    0: background
-    1: green vegetation
-    2: senescent vegetation
-    3: panicle
-    4: weed
-    5: duckweed
+ALCON用3クラス:
+    0: other = background
+    1: rice  = green vegetation + senescent vegetation + panicle
+    2: weed  = weed + duckweed
 
 可視化色:
-    0 background           : black
-    1 green vegetation     : green
-    2 senescent vegetation : yellow/brown
-    3 panicle              : orange
-    4 weed                 : white
-    5 duckweed             : cyan
+    0 other : black
+    1 rice  : gray
+    2 weed  : white
 
 注意:
     このスクリプトはALCON形式のoutput.csvは作らない。
-    あくまで「RiceSEGで学習したモデルが何を予測しているか」を見るための確認用。
+    あくまで「3クラスU-Netが何を予測しているか」を見るための確認用。
 """
 
 from __future__ import annotations
@@ -50,35 +42,31 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from riceseg_dataset import RiceSEGDataset, RICESEG_NUM_CLASSES
+from riceseg_dataset import RiceSEGDataset, ALCON_NUM_CLASSES
 from train_riceseg_unet import UNet
 
 
 CHECKPOINT_PATH = Path("checkpoints/riceseg_unet_best.pth")
 OUTPUT_DIR = Path("runs/riceseg_val")
 
-DEVICE = "cpu"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 IMAGE_SIZE = 512
 MAX_SAMPLES = 100
+LABEL_MODE = "alcon"
+NUM_CLASSES = ALCON_NUM_CLASSES
 
 # OpenCVはBGRで保存するため、ここではBGR順で色を定義する。
-# label/pred のクラスID画像を、人間が見やすいカラー画像に変換するための色。
+# ALCONの出力仕様に近い配色にする。
 CLASS_COLORS_BGR = {
-    0: (0, 0, 0),          # background: black
-    1: (0, 180, 0),        # green vegetation: green
-    2: (0, 180, 180),      # senescent vegetation: yellow-ish
-    3: (0, 120, 255),      # panicle: orange
-    4: (255, 255, 255),    # weed: white
-    5: (255, 255, 0),      # duckweed: cyan
+    0: (0, 0, 0),          # other: black
+    1: (128, 128, 128),    # rice: gray
+    2: (255, 255, 255),    # weed: white
 }
 
 CLASS_NAMES = {
-    0: "background",
-    1: "green vegetation",
-    2: "senescent vegetation",
-    3: "panicle",
-    4: "weed",
-    5: "duckweed",
+    0: "other",
+    1: "rice",
+    2: "weed",
 }
 
 
@@ -89,7 +77,7 @@ def colorize_label(label: np.ndarray) -> np.ndarray:
     Args:
         label:
             shape = (H, W)
-            各画素が 0〜5 のクラスID。
+            各画素が 0〜2 のALCON用クラスID。
 
     Returns:
         color:
@@ -132,9 +120,7 @@ def build_comparison_image(
     label_true: np.ndarray,
     label_pred: np.ndarray,
 ) -> np.ndarray:
-    """
-    元画像・正解ラベル・予測ラベルを横並びにした確認画像を作る。
-    """
+    """元画像・正解ラベル・予測ラベルを横並びにした確認画像を作る。"""
     image_resized = cv2.resize(image_bgr, (IMAGE_SIZE, IMAGE_SIZE), interpolation=cv2.INTER_LINEAR)
 
     true_color = colorize_label(label_true)
@@ -153,7 +139,7 @@ def print_class_pixels(label: np.ndarray, prefix: str) -> None:
     count_by_class = {int(v): int(c) for v, c in zip(values, counts)}
 
     text_parts = []
-    for class_id in range(RICESEG_NUM_CLASSES):
+    for class_id in range(NUM_CLASSES):
         count = count_by_class.get(class_id, 0)
         text_parts.append(f"{class_id}:{count}")
 
@@ -168,7 +154,15 @@ def load_model() -> UNet:
     checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
 
     base_channels = int(checkpoint.get("base_channels", 32))
-    num_classes = int(checkpoint.get("num_classes", RICESEG_NUM_CLASSES))
+    num_classes = int(checkpoint.get("num_classes", NUM_CLASSES))
+    label_mode = checkpoint.get("label_mode", "unknown")
+
+    if num_classes != NUM_CLASSES:
+        raise ValueError(
+            "checkpoint のクラス数がALCON用3クラスではありません: "
+            f"num_classes={num_classes}, expected={NUM_CLASSES}. "
+            "6クラスモデルのcheckpointを読み込んでいる可能性があります。"
+        )
 
     model = UNet(
         in_channels=3,
@@ -185,6 +179,7 @@ def load_model() -> UNet:
     print(f"  best_val_loss: {checkpoint.get('best_val_loss', 'unknown')}")
     print(f"  image_size   : {checkpoint.get('image_size', 'unknown')}")
     print(f"  base_channels: {base_channels}")
+    print(f"  label_mode   : {label_mode}")
     print(f"  num_classes  : {num_classes}")
 
     return model
@@ -227,11 +222,15 @@ def main() -> None:
         country="Japan",
         regions=["TKO_1", "TKO_2", "TKO_3"],
         image_size=IMAGE_SIZE,
+        label_mode=LABEL_MODE,
     )
 
     model = load_model()
 
     print("\n[INFO] prediction start")
+    print(f"device         : {DEVICE}")
+    print(f"label_mode     : {LABEL_MODE}")
+    print(f"num_classes    : {NUM_CLASSES}")
     print(f"dataset samples: {len(dataset)}")
     print(f"max samples    : {MAX_SAMPLES}")
     print(f"output dir     : {OUTPUT_DIR}")
@@ -269,7 +268,7 @@ def main() -> None:
 def print_class_legend() -> None:
     """クラスIDとクラス名の対応を表示する。"""
     print("[CLASS LEGEND]")
-    for class_id in range(RICESEG_NUM_CLASSES):
+    for class_id in range(NUM_CLASSES):
         print(f"  {class_id}: {CLASS_NAMES[class_id]}")
 
 
