@@ -1,19 +1,31 @@
 """
 RiceSEG を PyTorch の Dataset として読み込むためのモジュール。
 
-現段階では、ALCON画像に近いと考えられる Japan データのみを対象にする。
+RiceSEGには、国によって以下の2種類のディレクトリ構造が混在している。
 
-想定するRiceSEGの構造:
-    datasets/RiceSEG/global rice segmentation/Japan/
-    ├── TKO_1/
-    │   ├── rgb/
-    │   └── label/
-    ├── TKO_2/
-    │   ├── rgb/
-    │   └── label/
-    └── TKO_3/
-        ├── rgb/
-        └── label/
+1. regionあり構造:
+    datasets/RiceSEG/global rice segmentation/China/GD/
+    ├── rgb/
+    └── label/
+
+    datasets/RiceSEG/global rice segmentation/Japan/TKO_1/
+    ├── rgb/
+    └── label/
+
+2. regionなし構造:
+    datasets/RiceSEG/global rice segmentation/India/
+    ├── rgb/
+    └── label/
+
+    datasets/RiceSEG/global rice segmentation/Philippines/
+    ├── rgb/
+    └── label/
+
+    datasets/RiceSEG/global rice segmentation/Tanzania/
+    ├── rgb/
+    └── label/
+
+この Dataset は、regions=None の場合に上記2構造を自動判定する。
 
 確認済み仕様:
     - rgb と label はファイル名の stem が一致する。
@@ -115,21 +127,62 @@ class RiceSEGDataset(Dataset):
             raise FileNotFoundError(f"country_dir が存在しません: {self.country_dir}")
 
         if regions is None:
-            regions = sorted([p.name for p in self.country_dir.iterdir() if p.is_dir()])
+            regions = self._detect_regions()
 
         self.regions = regions
         self.samples = self._collect_samples()
 
         if not self.samples:
             raise RuntimeError(
-                f"rgb/label ペアが見つかりません: country={country}, regions={regions}"
+                f"rgb/label ペアが見つかりません: "
+                f"country={country}, regions={regions}, country_dir={self.country_dir}"
             )
+
+    def _detect_regions(self) -> list[str]:
+        """
+        country配下の構造からregion一覧を自動判定する。
+
+        Returns:
+            regionあり構造の場合:
+                ["GD", "GX", ...] や ["TKO_1", "TKO_2", "TKO_3"]
+
+            regionなし構造の場合:
+                ["."]
+                ここで "." は country_dir 直下の rgb/label を直接使うことを表す。
+        """
+        direct_rgb_dir = self.country_dir / "rgb"
+        direct_label_dir = self.country_dir / "label"
+
+        if direct_rgb_dir.exists() and direct_label_dir.exists():
+            return ["."]
+
+        ignored_dir_names = {
+            "rgb",
+            "label",
+            "image",
+            "images",
+            "mask",
+            "masks",
+            "__MACOSX",
+        }
+
+        return sorted(
+            [
+                p.name
+                for p in self.country_dir.iterdir()
+                if p.is_dir() and p.name not in ignored_dir_names
+            ]
+        )
 
     def _collect_samples(self) -> list[RiceSEGSample]:
         samples: list[RiceSEGSample] = []
 
         for region in self.regions:
-            region_dir = self.country_dir / region
+            if region == ".":
+                region_dir = self.country_dir
+            else:
+                region_dir = self.country_dir / region
+
             rgb_dir = region_dir / "rgb"
             label_dir = region_dir / "label"
 
@@ -169,7 +222,7 @@ class RiceSEGDataset(Dataset):
                         image_path=image_path,
                         label_path=label_path,
                         country=self.country,
-                        region=region,
+                        region=self.country if region == "." else region,
                     )
                 )
 
@@ -258,19 +311,43 @@ def create_japan_train_val_datasets(
     return train_dataset, val_dataset
 
 
+def create_country_dataset(
+    country: str,
+    image_size: int | None = None,
+    label_mode: str = "riceseg",
+) -> RiceSEGDataset:
+    """
+    指定した国の全データを読み込む。
+
+    regions=Noneにより、regionあり構造とregionなし構造を自動判定する。
+    """
+    return RiceSEGDataset(
+        country=country,
+        regions=None,
+        image_size=image_size,
+        label_mode=label_mode,
+    )
+
+
 def main() -> None:
     """Datasetが正しく読めるかの簡易確認。"""
+    countries = ["China", "India", "Japan", "Philippines", "Tanzania"]
+
     for label_mode in ["riceseg", "alcon"]:
         print(f"\n[label_mode={label_mode}]")
-        train_dataset, val_dataset = create_japan_train_val_datasets(label_mode=label_mode)
 
-        print(f"train samples: {len(train_dataset)}")
-        print(f"val samples  : {len(val_dataset)}")
+        for country in countries:
+            dataset = create_country_dataset(country=country, label_mode=label_mode)
+            print(f"{country:<12}: samples={len(dataset)}, regions={dataset.regions}")
 
-        image, label = train_dataset[0]
-        sample = train_dataset.get_sample_info(0)
+        japan_train, japan_val = create_japan_train_val_datasets(label_mode=label_mode)
+        print(f"Japan train samples: {len(japan_train)}")
+        print(f"Japan val samples  : {len(japan_val)}")
 
-        print("\n[first sample]")
+        image, label = japan_train[0]
+        sample = japan_train.get_sample_info(0)
+
+        print("\n[first Japan train sample]")
         print(f"image path: {sample.image_path}")
         print(f"label path: {sample.label_path}")
         print(f"image tensor: shape={tuple(image.shape)}, dtype={image.dtype}, min={image.min():.3f}, max={image.max():.3f}")

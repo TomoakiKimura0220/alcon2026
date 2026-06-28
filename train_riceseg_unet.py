@@ -51,27 +51,16 @@ from riceseg_dataset import RiceSEGDataset, ALCON_NUM_CLASSES
 CHECKPOINT_DIR = Path("checkpoints")
 BEST_MODEL_PATH = CHECKPOINT_DIR / "riceseg_unet_best.pth"
 
-# Colabではcuda、Macではcpuになる。
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-# RiceSEGのcrop画像は512x512。
-# weedは小さい領域として写ることが多いため、512x512のまま学習する。
 IMAGE_SIZE = 512
-
-# Global RiceSEGはJapanのみより枚数が多いため、学習はColab GPU前提。
-# Colab T4では4を基本値にする。メモリ不足なら2へ下げる。
 BATCH_SIZE = 4
-
 EPOCHS = 10
 LEARNING_RATE = 1e-3
 NUM_WORKERS = 0
 
-# ALCON用3クラスで学習する。
 NUM_CLASSES = ALCON_NUM_CLASSES
 LABEL_MODE = "alcon"
 
-# 学習に使う国。
-# 各国フォルダ配下の全regionを読み込むため、RiceSEGDatasetにはregions=Noneを渡す。
 COUNTRIES = [
     "China",
     "India",
@@ -81,10 +70,8 @@ COUNTRIES = [
 ]
 
 # 0 other, 1 rice, 2 weed。
-# Japan only実験では w4.5 がバランス型だったため、Global実験でもまず同じ重みで比較する。
+# Japan-only実験では4.5がバランス型だったため、Global実験でもまず同じ重みで比較する。
 CLASS_WEIGHTS = [0.5, 1.0, 4.5]
-
-# 全countryを結合して 8:2 にランダム分割する。
 TRAIN_RATIO = 0.8
 RANDOM_SEED = 42
 
@@ -109,16 +96,7 @@ class DoubleConv(nn.Module):
 
 
 class UNet(nn.Module):
-    """
-    軽量U-Net。
-
-    入力:
-        RGB画像 3ch
-
-    出力:
-        ALCON用3クラスのlogits
-        shape = (B, 3, H, W)
-    """
+    """軽量U-Net。"""
 
     def __init__(self, in_channels: int = 3, num_classes: int = 3, base_channels: int = 32) -> None:
         super().__init__()
@@ -129,7 +107,6 @@ class UNet(nn.Module):
         self.enc4 = DoubleConv(base_channels * 4, base_channels * 8)
 
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
-
         self.bottleneck = DoubleConv(base_channels * 8, base_channels * 16)
 
         self.up4 = nn.ConvTranspose2d(base_channels * 16, base_channels * 8, kernel_size=2, stride=2)
@@ -174,19 +151,13 @@ class UNet(nn.Module):
 
     @staticmethod
     def _concat(x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
-        """U-Netのskip connectionを結合する。"""
         if x.shape[-2:] != skip.shape[-2:]:
             x = F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False)
-
         return torch.cat([skip, x], dim=1)
 
 
 def create_country_dataset(country: str) -> RiceSEGDataset:
-    """
-    指定した国の全regionを読み込むRiceSEGDatasetを作る。
-
-    regions=None にすることで、countryフォルダ配下の全regionを対象にする。
-    """
+    """指定した国の全regionを読み込むRiceSEGDatasetを作る。"""
     return RiceSEGDataset(
         country=country,
         regions=None,
@@ -206,12 +177,10 @@ def create_random_global_train_val_datasets() -> tuple[torch.utils.data.Subset, 
         print(f"  {country:<12}: {len(dataset)} images")
 
     full_dataset = ConcatDataset(datasets)
-
     train_size = int(len(full_dataset) * TRAIN_RATIO)
     val_size = len(full_dataset) - train_size
 
     generator = torch.Generator().manual_seed(RANDOM_SEED)
-
     train_dataset, val_dataset = random_split(
         full_dataset,
         [train_size, val_size],
@@ -293,7 +262,6 @@ def validate_one_epoch(
 
         logits = model(images)
         loss = criterion(logits, labels)
-
         acc = calculate_pixel_accuracy(logits, labels)
 
         batch_size = images.size(0)
