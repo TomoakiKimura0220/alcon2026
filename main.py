@@ -52,6 +52,7 @@ ALCON2026 水稲・雑草セグメンテーション実行ファイル。
 """
 
 from pathlib import Path
+from time import perf_counter
 
 import cv2
 import numpy as np
@@ -87,6 +88,7 @@ def process_one(width: int, height: int, image_path: Path) -> list:
         7. 結果画像を保存する。
         8. output.csv に書き込む1行分のデータを返す。
     """
+    start_time = perf_counter()
     image = cv2.imread(str(image_path))
 
     if image is None:
@@ -117,9 +119,12 @@ def process_one(width: int, height: int, image_path: Path) -> list:
     output_path = make_output_path(image_path)
     cv2.imwrite(str(output_path), result_image)
 
+    elapsed_time = perf_counter() - start_time
+
     print(
         f"[INFO] result: judge={judge}, "
-        f"p={p}, w={w}, r={ratio}, output={output_path}"
+        f"p={p}, w={w}, r={ratio}, "
+        f"time={elapsed_time:.2f}s, output={output_path}"
     )
 
     return [
@@ -135,6 +140,7 @@ def process_one(width: int, height: int, image_path: Path) -> list:
 
 def main() -> None:
     """ALCON2026 推論処理のメイン関数。"""
+    total_start_time = perf_counter()
     input_rows = read_input_csv(INPUT_CSV)
 
     output_rows = []
@@ -146,7 +152,14 @@ def main() -> None:
 
     write_output_csv(output_rows, OUTPUT_CSV)
 
+    total_elapsed_time = perf_counter() - total_start_time
+
     print(f"[INFO] done: {OUTPUT_CSV}")
+    print(f"[INFO] total time: {total_elapsed_time:.2f}s")
+
+    if output_rows:
+        average_time = total_elapsed_time / len(output_rows)
+        print(f"[INFO] average time: {average_time:.2f}s/image")
 
 
 if __name__ == "__main__":
